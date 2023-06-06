@@ -1,6 +1,9 @@
 import { create } from 'ipfs-core'
-//import { create as createClient } from 'ipfs-http-client'
 import { CID } from 'multiformats/cid'
+import { Octokit } from '@octokit/core'
+import axios from 'axios'
+import { Blob, Buffer } from 'buffer'
+import Papa from 'papaparse'
 
 import { delegatedPeerRouting } from '@libp2p/delegated-peer-routing'
 import { delegatedContentRouting} from '@libp2p/delegated-content-routing'
@@ -11,12 +14,27 @@ import { create as createIpfsHttpClient } from 'kubo-rpc-client'
 import { multiaddr } from '@multiformats/multiaddr'
 import { webSockets } from '@libp2p/websockets'
 
+// Define "source of thruth" github repo and conventions
+const REPO = 'filecoin-renewables-purchases'
+const REPO_OWNER = 'protocol'
+const TRANSACTION_FOLDER = '_transaction_'
+const STEP_2_FILE_NAME_SUFFIX = '_step2_orderSupply.csv'
+const STEP_3_FILE_NAME_SUFFIX = '_step3_match.csv'
+const STEP_5_FILE_NAME_SUFFIX = '_step5_redemption_information.csv'
+const STEP_6_FILE_NAME_SUFFIX = '_step6_generationRecords.csv'
+const STEP_7_FILE_NAME_SUFFIX = '_step7_certificate_to_contract.csv'
+
 const ws = new webSockets()
-//const ipfsClient = createClient({url: '/dns4/green.filecoin.space/tcp/5002/https', timeout: '1w'})
+
 const ipfsClient = createIpfsHttpClient({
 	protocol: 'https',
 	port: 5002,
 	host: 'green.filecoin.space'
+})
+
+// Init Octokit
+const octokit = new Octokit({
+	auth: `${process.env.github_personal_access_token}`
 })
 
 export class RenewableEnergyPurchases {
@@ -30,27 +48,24 @@ export class RenewableEnergyPurchases {
 	ipfsRepoName = './.ipfs'
 	ipfsNodeOpts = {
 		config: {
-//			dht: {
-//				enabled: true,
-//			},
-Addresses: {
-	Delegates: [/*
-		'/dns4/green.filecoin.space/tcp/5002/https',
-		'/dns4/web1.co2.storage/tcp/5002/https',
-		'/dns4/web2.co2.storage/tcp/5002/https',
-		'/dns4/proxy.co2.storage/tcp/5002/https',*/
-		'/dns4/node0.delegate.ipfs.io/tcp/443/https',
-		'/dns4/node1.delegate.ipfs.io/tcp/443/https',
-		'/dns4/node2.delegate.ipfs.io/tcp/443/https',
-		'/dns4/node3.delegate.ipfs.io/tcp/443/https'
-	  ]
-},
-Bootstrap: [
-	'/dns4/green.filecoin.space/tcp/5004/wss/p2p/12D3KooWJmYbQp2sgKX22vZgSRVURkpMQ5YCSc8vf3toHesJc5Y9',
-	'/dns4/web1.co2.storage/tcp/5004/wss/p2p/12D3KooWCPzmui9TSQQG8HTNcZeFiHz6AGS19aaCwxJdjykVqq7f',
-	'/dns4/web2.co2.storage/tcp/5004/wss/p2p/12D3KooWFBCcWEDW9GYr9Aw8D2QL7hZakPAw1DGfeZCwfsrjd43b',
-	'/dns4/proxy.co2.storage/tcp/5004/wss/p2p/12D3KooWGWHSrAxr6sznTpdcGuqz6zfQ2Y43PZQzhg22uJmGP9n1',
-]
+			Addresses: {
+				Delegates: [/*
+					'/dns4/green.filecoin.space/tcp/5002/https',
+					'/dns4/web1.co2.storage/tcp/5002/https',
+					'/dns4/web2.co2.storage/tcp/5002/https',
+					'/dns4/proxy.co2.storage/tcp/5002/https',*/
+					'/dns4/node0.delegate.ipfs.io/tcp/443/https',
+					'/dns4/node1.delegate.ipfs.io/tcp/443/https',
+					'/dns4/node2.delegate.ipfs.io/tcp/443/https',
+					'/dns4/node3.delegate.ipfs.io/tcp/443/https'
+				]
+			},
+			Bootstrap: [
+				'/dns4/green.filecoin.space/tcp/5004/wss/p2p/12D3KooWJmYbQp2sgKX22vZgSRVURkpMQ5YCSc8vf3toHesJc5Y9',
+				'/dns4/web1.co2.storage/tcp/5004/wss/p2p/12D3KooWCPzmui9TSQQG8HTNcZeFiHz6AGS19aaCwxJdjykVqq7f',
+				'/dns4/web2.co2.storage/tcp/5004/wss/p2p/12D3KooWFBCcWEDW9GYr9Aw8D2QL7hZakPAw1DGfeZCwfsrjd43b',
+				'/dns4/proxy.co2.storage/tcp/5004/wss/p2p/12D3KooWGWHSrAxr6sznTpdcGuqz6zfQ2Y43PZQzhg22uJmGP9n1',
+			]
 		},
 		libp2p: {
 			transports: [ws],
@@ -80,6 +95,11 @@ Bootstrap: [
 	ipfsStarted = false
 	contractsAndAllocationsKey = '/ipns/k51qzi5uqu5dlwhffqq4a8ksdtr14d3vckvhldpuxd68r84g3eqsjqgqdvxazc'
 	certificatesAndAttestationsKey = '/ipns/k51qzi5uqu5dkllf259064y4qyr6ra1zk7u8qgigsoahwo04m0efnf88827ume'
+	repo = REPO
+	repoOwner = REPO_OWNER
+	transactionFolder = TRANSACTION_FOLDER
+	contractsFileNameSuffix = STEP_2_FILE_NAME_SUFFIX
+	allocationsFileNameSuffix = STEP_3_FILE_NAME_SUFFIX
 
 	// Constructor
     constructor(options) {
@@ -93,6 +113,16 @@ Bootstrap: [
 			this.contractsAndAllocationsKey = options.contractsAndAllocationsKey
 		if(options.certificatesAndAttestationsKey	 != undefined)
 			this.certificatesAndAttestationsKey = options.certificatesAndAttestationsKey
+		if(options.repoOwner != undefined)
+			this.repoOwner = options.repoOwner
+		if(options.repo != undefined)
+			this.repo = options.repo
+		if(options.transactionFolder != undefined)
+			this.transactionFolder = options.transactionFolder
+		if(options.contractsFileNameSuffix != undefined)
+			this.contractsFileNameSuffix = options.contractsFileNameSuffix
+		if(options.allocationsFileNameSuffix != undefined)
+			this.allocationsFileNameSuffix = options.allocationsFileNameSuffix
 	}
 
 	// Simple sleep function
@@ -202,5 +232,266 @@ Bootstrap: [
 			await this.ensureIpfsIsRunning()
 
 		return (await this.getDag((await this.getDagFromIPNS(this.certificatesAndAttestationsKey)).dag.deliveries_cid)).dag
+	}
+
+	// Get contents of base repo directory
+	async getGithubRepoContents() {
+		const repoItems = await octokit.request('GET /repos/{owner}/{repo}/contents', {
+			owner: this.repoOwner,
+			repo: this.repo
+		})
+		if(repoItems.status != 200)
+			return new Promise((resolve, reject) => {
+				reject(repoItems)
+			})
+		return new Promise((resolve, reject) => {
+			resolve(repoItems)
+		})
+	}
+
+	// Get all transactions folders from Github repo
+	async getTransactionsFolders() {
+		let repoItems
+		try {
+			repoItems = await this.getGithubRepoContents()
+		} catch (error) {
+			return new Promise((resolve, reject) => {
+				reject(error)
+			})
+		}
+		// Search through the base repo directory for folders containing TRANSACTION_FOLDER in its name
+		return new Promise((resolve, reject) => {
+			resolve(repoItems.data.filter((item) => {
+				return item.name.indexOf(this.transactionFolder) > -1
+					&& item.type == 'dir'
+			}))
+		})
+	}
+
+	// Get content from URI
+	async getUriContent(getUri, headers, responseType) {
+		return axios(getUri, {
+			method: 'get',
+			headers: headers,
+			responseType: responseType
+		})
+	}
+
+	unicodeDecodeB64(str) {
+		return decodeURIComponent(atob(str));
+	}
+
+	// Get raw content from Github repo
+	async getRawFromGithub(path, fileName, type, contentType) {		
+		const uri = `https://api.github.com/repos/${this.repoOwner}/${this.repo}/contents/${path}/${fileName}`
+		const headers = {
+			'Authorization': `Bearer ${process.env.github_personal_access_token}`,
+			'X-GitHub-Api-Version': '2022-11-28'
+		}
+
+		let responseType
+		switch (type) {
+			case 'arraybuffer':
+				responseType = 'arraybuffer'
+				break
+			default:
+				responseType = null
+				break
+		}
+
+		const resp = await this.getUriContent(uri, headers, responseType)
+		if(resp.status != 200)
+			return new Promise((resolve, reject) => {
+				reject(resp)
+			})
+
+		switch (type) {
+			case 'csv':
+				const csv = this.unicodeDecodeB64(resp.data.content)
+				let rows = []
+				return new Promise((resolve, reject) => {
+					Papa.parse(csv, {
+						worker: true,
+						header: true,
+						dynamicTyping: true,
+						comments: "#",
+						step: (row) => {
+							rows.push(row.data)
+						},
+						complete: () => {
+							resolve(rows)
+						}
+					})
+				})
+			case 'arraybuffer':
+				return new Promise((resolve, reject) => {
+					let content = []
+					content.push(resp.data.content)
+//					const blob = new Blob(content, {type: contentType})
+					const blob = new Buffer.from(content)
+					resolve(blob)
+				})
+			default:
+				return new Promise((resolve, reject) => {
+					resolve(resp.data.content)
+				})
+		}
+	}
+
+	async getContractsAndAllocationsFromGithub() {
+		let contracts = {}
+		let demands = {}
+		let transactions = {}
+	
+		let transactionFolders 
+		try {
+			transactionFolders = await this.getTransactionsFolders()
+		} catch (error) {
+			return new Promise((resolve, reject) => {
+				reject(error)
+			})
+		}
+
+		for (const transactionFolder of transactionFolders) {
+			let demandsCache = {}
+			let contractsCache = {}
+			let allocations = {}
+	
+			// Get contents of transactions directory
+			const transactionFolderItems = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+				owner: this.repoOwner,
+				repo: this.repo,
+				path: transactionFolder.path
+			})
+			if(transactionFolderItems.status != 200)
+				return new Promise((resolve, reject) => {
+					reject(transactionFolderItems)
+				})
+	
+			// Search for contracts CSV file
+			const contractsCsvFileName = transactionFolder.name + this.contractsFileNameSuffix
+	
+			// Check if contracts CSV file is present in the folder
+			const contractsCsvFile = transactionFolderItems.data.filter((item) => {
+				return item.name == contractsCsvFileName
+					&& item.type == 'file'
+			})
+	
+			if(contractsCsvFile.length != 1)	// not valid TRANSACTION_FOLDER
+				continue
+
+			// Get CSV content (contracts for this specific order)
+			contracts[transactionFolder.name] = await this.getRawFromGithub(transactionFolder.path, contractsCsvFileName, 'csv')
+			
+			// Search through allocations CSV file for match
+			const matchName = transactionFolder.name + this.allocationsFileNameSuffix
+
+			// Check if CSV file is present in the folder
+			const match = transactionFolderItems.data.filter((item) => {
+				return item.name == matchName
+					&& item.type == 'file'
+			})
+
+			if(match.length != 1)	// No allocation file found
+				continue
+
+			// Get CSV content (allocations for this specific order)
+			demands[transactionFolder.name] = await this.getRawFromGithub(transactionFolder.path, matchName, 'csv')
+
+			// Delete mutable columns and at same create DAG structures for demands
+			for (const demand of demands[transactionFolder.name]) {
+				// Check if there is valid CSV line
+				if(!demand.contract_id)
+					continue
+				// Delete mutable columns
+				delete demand.step4_ZL_contract_complete
+				delete demand.step5_redemption_data_complete
+				delete demand.step6_attestation_info_complete
+				delete demand.step7_certificates_matched_to_supply
+				delete demand.step8_IPLDrecord_complete
+				delete demand.step9_transaction_complete
+				delete demand.step10_volta_complete
+				delete demand.step11_finalRecord_complete
+
+				// Make sure MWh are Numbers
+				if(typeof demand.volume_MWh == "string") {
+					demand.volume_MWh = demand.volume_MWh.replace(',', '')
+					demand.volume_MWh = demand.volume_MWh.trim()
+					demand.volume_MWh = Number(demand.volume_MWh)
+				}
+
+				// Make vice-versa linking for allocations
+				allocations[demand.allocation_id] = {
+					"minerID": demand.minerID,
+					"volume_MWh": demand.volume_MWh,
+					"defaulted": demand.defaulted,
+					"contract_id": demand.contract_id
+				}
+
+				// Relate demand allocations with contract Id so that we do
+				// not have to traverse whole JSON structure
+				if(demandsCache[demand.contract_id] == null)
+					demandsCache[demand.contract_id] = []
+				demandsCache[demand.contract_id].push(allocations)
+			}
+
+			// Delete mutable columns and at same create DAG structures for contracts
+			for (const contract of contracts[transactionFolder.name]) {
+				// Delete mutable columns
+				delete contract.step2_order_complete
+				delete contract.step3_match_complete
+				delete contract.step4_ZL_contract_complete
+				delete contract.step5_redemption_data_complete
+				delete contract.step6_attestation_info_complete
+				delete contract.step7_certificates_matched_to_supply
+				delete contract.step8_IPLDrecord_complete
+				delete contract.step9_transaction_complete
+				delete contract.step10_volta_complete
+				delete contract.step11_finalRecord_complete
+
+				// Make sure MWh are Numbers
+				if(typeof contract.volume_MWh == "string") {
+					contract.volume_MWh = contract.volume_MWh.replace(',', '')
+					contract.volume_MWh = contract.volume_MWh.trim()
+					contract.volume_MWh = Number(contract.volume_MWh)
+				}
+				
+				// Add links to demands
+				contract.allocations = demandsCache[contract.contract_id]
+
+				// Remeber contract IDs and CIDs
+				contractsCache[contract.contract_id] = {
+					"contract_id": contract.contract_id,
+					"label": contract.label,
+					"region": contract.region,
+					"country": contract.country,
+					"sellerName": contract.sellerName,
+					"volume_MWh": contract.volume_MWh,
+					"productType": contract.productType,
+					"contractDate": contract.contractDate,
+					"deliveryDate": contract.deliveryDate,
+					"reportingEnd": contract.reportingEnd,
+					"energySources": contract.energySources,
+					"sellerAddress": contract.sellerAddress,
+					"reportingStart": contract.reportingStart
+				}
+
+			}
+
+			// Create transaction object
+			const transaction = {
+				name: transactionFolder.name,
+				contracts: contractsCache,
+				allocations: allocations
+			}
+
+			// Add allocations to transaction object for this transaction
+			transactions[transactionFolder.name] = {
+				"transaction": transaction
+			}
+		}
+		return new Promise((resolve, reject) => {
+			resolve(transactions)
+		})
 	}
 }
