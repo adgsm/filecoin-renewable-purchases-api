@@ -100,6 +100,9 @@ export class RenewableEnergyPurchases {
 	transactionFolder = TRANSACTION_FOLDER
 	contractsFileNameSuffix = STEP_2_FILE_NAME_SUFFIX
 	allocationsFileNameSuffix = STEP_3_FILE_NAME_SUFFIX
+	redemptionsFileNameSuffix = STEP_5_FILE_NAME_SUFFIX
+	attestationsFileNameSuffix = STEP_6_FILE_NAME_SUFFIX
+	certificatesFileNameSuffix = STEP_7_FILE_NAME_SUFFIX
 
 	// Constructor
     constructor(options) {
@@ -123,6 +126,12 @@ export class RenewableEnergyPurchases {
 			this.contractsFileNameSuffix = options.contractsFileNameSuffix
 		if(options.allocationsFileNameSuffix != undefined)
 			this.allocationsFileNameSuffix = options.allocationsFileNameSuffix
+		if(options.redemptionsFileNameSuffix != undefined)
+			this.redemptionsFileNameSuffix = options.redemptionsFileNameSuffix
+		if(options.attestationsFileNameSuffix != undefined)
+			this.attestationsFileNameSuffix = options.attestationsFileNameSuffix
+		if(options.certificatesFileNameSuffix != undefined)
+			this.certificatesFileNameSuffix = options.certificatesFileNameSuffix
 	}
 
 	// Simple sleep function
@@ -492,6 +501,138 @@ export class RenewableEnergyPurchases {
 		}
 		return new Promise((resolve, reject) => {
 			resolve(transactions)
+		})
+	}
+
+	async getAttestationsAndCertificatesFromGithub() {
+		let redemptions = {}
+		let attestations = {}
+		let certificates = {}
+		let deliveries = {}
+
+		let transactionFolders 
+		try {
+			transactionFolders = await this.getTransactionsFolders()
+		} catch (error) {
+			return new Promise((resolve, reject) => {
+				reject(error)
+			})
+		}
+
+		for (const transactionFolder of transactionFolders) {	
+			// Get contents of transactions directory
+			const transactionFolderItems = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+				owner: this.repoOwner,
+				repo: this.repo,
+				path: transactionFolder.path
+			})
+			if(transactionFolderItems.status != 200)
+				return new Promise((resolve, reject) => {
+					reject(transactionFolderItems)
+				})
+
+			// Search for redemption CSV file
+			const redemptionsCsvFileName = transactionFolder.name + this.redemptionsFileNameSuffix
+	
+			// Check if CSV file is present in the folder
+			const redemptionsCsvFile = transactionFolderItems.data.filter((item) => {
+				return item.name == redemptionsCsvFileName
+					&& item.type == 'file'
+			})
+	
+			if(redemptionsCsvFile.length != 1)
+				continue
+
+			// Get CSV content (redemptions for this specific order)
+			redemptions[transactionFolder.name] = await this.getRawFromGithub(transactionFolder.path, redemptionsCsvFileName, 'csv')
+
+			// Theoretically we should search folder path with each attestation
+			// but since all redemptions point to the same folder let take it from line 1
+			if(redemptions[transactionFolder.name].length == 0) {
+				console.error(`Empty redemptions file ${redemptionsCsvFileName}`)
+				continue
+			}
+
+			const attestationFolder = redemptions[transactionFolder.name][0].attestation_folder
+			if(!attestationFolder || !attestationFolder.length) {
+				console.error(`Invalid attestation folder specified in ${redemptionsCsvFileName}`)
+				continue
+			}
+
+			// Look for attestation folder and its contents
+			let attestationFolderItems
+			try {
+				attestationFolderItems = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+					owner: this.repoOwner,
+					repo: this.repo,
+					path: attestationFolder
+				})
+			}
+			catch (error) {
+				console.error(error)
+				continue
+			}
+			if(attestationFolderItems.status != 200) {
+				console.error(attestationFolderItems)
+				continue
+			}
+
+			// Search for attestations CSV file
+			const attestationsCsvFileName = attestationFolder + this.attestationsFileNameSuffix
+
+			// Check if CSV file is present in the folder
+			const attestationsCsvFile = attestationFolderItems.data.filter((item) => {
+				return item.name == attestationsCsvFileName
+					&& item.type == 'file'
+			})
+
+			if(attestationsCsvFile.length != 1) {
+				console.error(`No attestation file ${attestationsCsvFileName} exists in ${attestationFolder}`)
+				continue
+			}
+
+			// Get CSV content (acctually attestations and attestations)
+			attestations[attestationFolder] = await this.getRawFromGithub(attestationFolder, attestationsCsvFileName, 'csv')
+
+			// Search for match / supply CSV file
+			const certificatesCsvFileName = attestationFolder + this.certificatesFileNameSuffix
+
+			// Check if CSV file is present in the folder
+			const certificatesCsvFile = attestationFolderItems.data.filter((item) => {
+				return item.name == certificatesCsvFileName
+					&& item.type == 'file'
+			})
+
+			if(certificatesCsvFile.length != 1) {
+				console.error(`No certificates file ${certificatesCsvFileName} exists in ${attestationFolder}`)
+				continue
+			}
+
+			// Get CSV content (certificates)
+			certificates[attestationFolder] = await this.getRawFromGithub(attestationFolder, certificatesCsvFileName, 'csv')
+
+			// Itterate over attestations and associate certificates and allocations
+			for (let attestation of attestations[attestationFolder]) {
+				const allocations = certificates[attestationFolder].filter((certificate)=>{
+					return certificate.certificate == attestation.certificate
+				})
+				attestation.allocations = allocations
+			}
+
+			// Create delivery object
+			const delivery = {
+				name: transactionFolder.name,
+				attestations: attestations[attestationFolder],
+				certificates: certificates[attestationFolder]
+			}
+
+			// Add allocations to transaction object for this transaction
+			deliveries[transactionFolder.name] = {
+				"delivery": delivery
+			}
+		}
+		return new Promise((resolve, reject) => {
+			resolve(deliveries)
 		})
 	}
 }
