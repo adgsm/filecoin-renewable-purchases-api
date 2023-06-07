@@ -349,7 +349,7 @@ export class RenewableEnergyPurchases {
 
 	async getContractsAndAllocationsFromGithub() {
 		let contracts = {}
-		let demands = {}
+		let allocations = {}
 		let transactions = {}
 	
 		let transactionFolders 
@@ -362,10 +362,6 @@ export class RenewableEnergyPurchases {
 		}
 
 		for (const transactionFolder of transactionFolders) {
-			let demandsCache = {}
-			let contractsCache = {}
-			let allocations = {}
-	
 			// Get contents of transactions directory
 			const transactionFolderItems = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
 				owner: this.repoOwner,
@@ -393,59 +389,45 @@ export class RenewableEnergyPurchases {
 			contracts[transactionFolder.name] = await this.getRawFromGithub(transactionFolder.path, contractsCsvFileName, 'csv')
 			
 			// Search through allocations CSV file for match
-			const matchName = transactionFolder.name + this.allocationsFileNameSuffix
+			const allocationsCsvFileName = transactionFolder.name + this.allocationsFileNameSuffix
 
 			// Check if CSV file is present in the folder
-			const match = transactionFolderItems.data.filter((item) => {
-				return item.name == matchName
+			const allocationsCsvFile = transactionFolderItems.data.filter((item) => {
+				return item.name == allocationsCsvFileName
 					&& item.type == 'file'
 			})
 
-			if(match.length != 1)	// No allocation file found
+			if(allocationsCsvFile.length != 1)	// No allocation file found
 				continue
 
 			// Get CSV content (allocations for this specific order)
-			demands[transactionFolder.name] = await this.getRawFromGithub(transactionFolder.path, matchName, 'csv')
+			allocations[transactionFolder.name] = await this.getRawFromGithub(transactionFolder.path, allocationsCsvFileName, 'csv')
 
-			// Delete mutable columns and at same create DAG structures for demands
-			for (const demand of demands[transactionFolder.name]) {
+			// Delete mutable columns and at same create DAG structures for allocations
+			for (let allocation of allocations[transactionFolder.name]) {
 				// Check if there is valid CSV line
-				if(!demand.contract_id)
+				if(!allocation.contract_id)
 					continue
 				// Delete mutable columns
-				delete demand.step4_ZL_contract_complete
-				delete demand.step5_redemption_data_complete
-				delete demand.step6_attestation_info_complete
-				delete demand.step7_certificates_matched_to_supply
-				delete demand.step8_IPLDrecord_complete
-				delete demand.step9_transaction_complete
-				delete demand.step10_volta_complete
-				delete demand.step11_finalRecord_complete
+				delete allocation.step4_ZL_contract_complete
+				delete allocation.step5_redemption_data_complete
+				delete allocation.step6_attestation_info_complete
+				delete allocation.step7_certificates_matched_to_supply
+				delete allocation.step8_IPLDrecord_complete
+				delete allocation.step9_transaction_complete
+				delete allocation.step10_volta_complete
+				delete allocation.step11_finalRecord_complete
 
 				// Make sure MWh are Numbers
-				if(typeof demand.volume_MWh == "string") {
-					demand.volume_MWh = demand.volume_MWh.replace(',', '')
-					demand.volume_MWh = demand.volume_MWh.trim()
-					demand.volume_MWh = Number(demand.volume_MWh)
+				if(typeof allocation.volume_MWh == "string") {
+					allocation.volume_MWh = allocation.volume_MWh.replace(',', '')
+					allocation.volume_MWh = allocation.volume_MWh.trim()
+					allocation.volume_MWh = Number(allocation.volume_MWh)
 				}
-
-				// Make vice-versa linking for allocations
-				allocations[demand.allocation_id] = {
-					"minerID": demand.minerID,
-					"volume_MWh": demand.volume_MWh,
-					"defaulted": demand.defaulted,
-					"contract_id": demand.contract_id
-				}
-
-				// Relate demand allocations with contract Id so that we do
-				// not have to traverse whole JSON structure
-				if(demandsCache[demand.contract_id] == null)
-					demandsCache[demand.contract_id] = []
-				demandsCache[demand.contract_id].push(allocations)
 			}
 
 			// Delete mutable columns and at same create DAG structures for contracts
-			for (const contract of contracts[transactionFolder.name]) {
+			for (let contract of contracts[transactionFolder.name]) {
 				// Delete mutable columns
 				delete contract.step2_order_complete
 				delete contract.step3_match_complete
@@ -466,38 +448,20 @@ export class RenewableEnergyPurchases {
 				}
 				
 				// Add links to demands
-				contract.allocations = demandsCache[contract.contract_id]
-
-				// Remeber contract IDs and CIDs
-				contractsCache[contract.contract_id] = {
-					"contract_id": contract.contract_id,
-					"label": contract.label,
-					"region": contract.region,
-					"country": contract.country,
-					"sellerName": contract.sellerName,
-					"volume_MWh": contract.volume_MWh,
-					"productType": contract.productType,
-					"contractDate": contract.contractDate,
-					"deliveryDate": contract.deliveryDate,
-					"reportingEnd": contract.reportingEnd,
-					"energySources": contract.energySources,
-					"sellerAddress": contract.sellerAddress,
-					"reportingStart": contract.reportingStart
-				}
-
+				contract.allocations = allocations[transactionFolder.name].filter((allocation)=>{
+					return allocation.contract_id == contract.contract_id
+				})
 			}
 
 			// Create transaction object
 			const transaction = {
 				name: transactionFolder.name,
-				contracts: contractsCache,
-				allocations: allocations
+				contracts: contracts[transactionFolder.name],
+				allocations: allocations[transactionFolder.name]
 			}
 
 			// Add allocations to transaction object for this transaction
-			transactions[transactionFolder.name] = {
-				"transaction": transaction
-			}
+			transactions[transactionFolder.name] = transaction
 		}
 		return new Promise((resolve, reject) => {
 			resolve(transactions)
@@ -623,13 +587,11 @@ export class RenewableEnergyPurchases {
 			const delivery = {
 				name: transactionFolder.name,
 				attestations: attestations[attestationFolder],
-				certificates: certificates[attestationFolder]
+				"certificate-allocations": certificates[attestationFolder]
 			}
 
 			// Add allocations to transaction object for this transaction
-			deliveries[transactionFolder.name] = {
-				"delivery": delivery
-			}
+			deliveries[transactionFolder.name] = delivery
 		}
 		return new Promise((resolve, reject) => {
 			resolve(deliveries)
