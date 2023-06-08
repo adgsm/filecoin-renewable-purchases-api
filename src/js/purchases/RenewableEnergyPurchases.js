@@ -597,4 +597,262 @@ export class RenewableEnergyPurchases {
 			resolve(deliveries)
 		})
 	}
+
+	async getAllAllocationsFromGithub() {
+		let contracts = {}
+		let allocations = {}
+		let allAllocations = []
+	
+		let transactionFolders 
+		try {
+			transactionFolders = await this.getTransactionsFolders()
+		} catch (error) {
+			return new Promise((resolve, reject) => {
+				reject(error)
+			})
+		}
+
+		for (const transactionFolder of transactionFolders) {
+			// Get contents of transactions directory
+			const transactionFolderItems = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+				owner: this.repoOwner,
+				repo: this.repo,
+				path: transactionFolder.path
+			})
+			if(transactionFolderItems.status != 200)
+				return new Promise((resolve, reject) => {
+					reject(transactionFolderItems)
+				})
+	
+			// Search for contracts CSV file
+			const contractsCsvFileName = transactionFolder.name + this.contractsFileNameSuffix
+	
+			// Check if contracts CSV file is present in the folder
+			const contractsCsvFile = transactionFolderItems.data.filter((item) => {
+				return item.name == contractsCsvFileName
+					&& item.type == 'file'
+			})
+	
+			if(contractsCsvFile.length != 1)	// not valid TRANSACTION_FOLDER
+				continue
+
+			// Get CSV content (contracts for this specific order)
+			contracts[transactionFolder.name] = await this.getRawFromGithub(transactionFolder.path, contractsCsvFileName, 'csv')
+			
+			// Search through allocations CSV file for match
+			const allocationsCsvFileName = transactionFolder.name + this.allocationsFileNameSuffix
+
+			// Check if CSV file is present in the folder
+			const allocationsCsvFile = transactionFolderItems.data.filter((item) => {
+				return item.name == allocationsCsvFileName
+					&& item.type == 'file'
+			})
+
+			if(allocationsCsvFile.length != 1)	// No allocation file found
+				continue
+
+			// Get CSV content (allocations for this specific order)
+			allocations[transactionFolder.name] = await this.getRawFromGithub(transactionFolder.path, allocationsCsvFileName, 'csv')
+
+			// Delete mutable columns and at same create DAG structures for allocations
+			for (let allocation of allocations[transactionFolder.name]) {
+				// Check if there is valid CSV line
+				if(!allocation.contract_id)
+					continue
+				// Delete mutable columns
+				delete allocation.step4_ZL_contract_complete
+				delete allocation.step5_redemption_data_complete
+				delete allocation.step6_attestation_info_complete
+				delete allocation.step7_certificates_matched_to_supply
+				delete allocation.step8_IPLDrecord_complete
+				delete allocation.step9_transaction_complete
+				delete allocation.step10_volta_complete
+				delete allocation.step11_finalRecord_complete
+
+				// Make sure MWh are Numbers
+				if(typeof allocation.volume_MWh == "string") {
+					allocation.volume_MWh = allocation.volume_MWh.replace(',', '')
+					allocation.volume_MWh = allocation.volume_MWh.trim()
+					allocation.volume_MWh = Number(allocation.volume_MWh)
+				}
+				
+				// Add contract fields to the record
+				const contractFilter = contracts[transactionFolder.name].filter((c)=>{
+					return c.contract_id == allocation.contract_id
+				})
+				if(contractFilter.length != 1)
+					return new Promise((resolve, reject) => {
+						reject(`An allocation must refer to exactly one contract. ${allocation.allocation_id} referes to ${contractFilter.length} contracts.`)
+					})
+
+				let contract = JSON.parse(JSON.stringify(contractFilter[0]))
+
+				// Delete mutable columns
+				delete contract.step2_order_complete
+				delete contract.step3_match_complete
+				delete contract.step4_ZL_contract_complete
+				delete contract.step5_redemption_data_complete
+				delete contract.step6_attestation_info_complete
+				delete contract.step7_certificates_matched_to_supply
+				delete contract.step8_IPLDrecord_complete
+				delete contract.step9_transaction_complete
+				delete contract.step10_volta_complete
+				delete contract.step11_finalRecord_complete
+
+				// Make sure MWh are Numbers
+				if(typeof contract.volume_MWh == "string") {
+					contract.volume_MWh = contract.volume_MWh.replace(',', '')
+					contract.volume_MWh = contract.volume_MWh.trim()
+					contract.volume_MWh = Number(contract.volume_MWh)
+				}
+
+				// Rename contract volume_MWh and allocation volume_MWh
+				delete Object.assign(contract, {contract_volume_MWh: contract.volume_MWh }).volume_MWh
+				delete Object.assign(allocation, {allocation_volume_MWh: allocation.volume_MWh }).volume_MWh
+
+				// Itterate over contract object and add its propoerties to allocation object
+				allocation = Object.assign(allocation, contract)
+
+				// Add allocation to allAllocations
+				allAllocations.push(allocation)
+			}
+		}
+		return new Promise((resolve, reject) => {
+			resolve(allAllocations)
+		})
+	}
+
+	async getAllCertificateAllocationsFromGithub() {
+		let redemptions = {}
+		let attestations = {}
+		let certificates = {}
+		let allCertificates = []
+
+		let transactionFolders 
+		try {
+			transactionFolders = await this.getTransactionsFolders()
+		} catch (error) {
+			return new Promise((resolve, reject) => {
+				reject(error)
+			})
+		}
+
+		for (const transactionFolder of transactionFolders) {	
+			// Get contents of transactions directory
+			const transactionFolderItems = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+				owner: this.repoOwner,
+				repo: this.repo,
+				path: transactionFolder.path
+			})
+			if(transactionFolderItems.status != 200)
+				return new Promise((resolve, reject) => {
+					reject(transactionFolderItems)
+				})
+
+			// Search for redemption CSV file
+			const redemptionsCsvFileName = transactionFolder.name + this.redemptionsFileNameSuffix
+	
+			// Check if CSV file is present in the folder
+			const redemptionsCsvFile = transactionFolderItems.data.filter((item) => {
+				return item.name == redemptionsCsvFileName
+					&& item.type == 'file'
+			})
+	
+			if(redemptionsCsvFile.length != 1)
+				continue
+
+			// Get CSV content (redemptions for this specific order)
+			redemptions[transactionFolder.name] = await this.getRawFromGithub(transactionFolder.path, redemptionsCsvFileName, 'csv')
+
+			// Theoretically we should search folder path with each attestation
+			// but since all redemptions point to the same folder let take it from line 1
+			if(redemptions[transactionFolder.name].length == 0) {
+				console.error(`Empty redemptions file ${redemptionsCsvFileName}`)
+				continue
+			}
+
+			const attestationFolder = redemptions[transactionFolder.name][0].attestation_folder
+			if(!attestationFolder || !attestationFolder.length) {
+				console.error(`Invalid attestation folder specified in ${redemptionsCsvFileName}`)
+				continue
+			}
+
+			// Look for attestation folder and its contents
+			let attestationFolderItems
+			try {
+				attestationFolderItems = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+					owner: this.repoOwner,
+					repo: this.repo,
+					path: attestationFolder
+				})
+			}
+			catch (error) {
+				console.error(error)
+				continue
+			}
+			if(attestationFolderItems.status != 200) {
+				console.error(attestationFolderItems)
+				continue
+			}
+
+			// Search for attestations CSV file
+			const attestationsCsvFileName = attestationFolder + this.attestationsFileNameSuffix
+
+			// Check if CSV file is present in the folder
+			const attestationsCsvFile = attestationFolderItems.data.filter((item) => {
+				return item.name == attestationsCsvFileName
+					&& item.type == 'file'
+			})
+
+			if(attestationsCsvFile.length != 1) {
+				console.error(`No attestation file ${attestationsCsvFileName} exists in ${attestationFolder}`)
+				continue
+			}
+
+			// Get CSV content (acctually attestations and attestations)
+			attestations[attestationFolder] = await this.getRawFromGithub(attestationFolder, attestationsCsvFileName, 'csv')
+
+			// Search for match / supply CSV file
+			const certificatesCsvFileName = attestationFolder + this.certificatesFileNameSuffix
+
+			// Check if CSV file is present in the folder
+			const certificatesCsvFile = attestationFolderItems.data.filter((item) => {
+				return item.name == certificatesCsvFileName
+					&& item.type == 'file'
+			})
+
+			if(certificatesCsvFile.length != 1) {
+				console.error(`No certificates file ${certificatesCsvFileName} exists in ${attestationFolder}`)
+				continue
+			}
+
+			// Get CSV content (certificates)
+			certificates[attestationFolder] = await this.getRawFromGithub(attestationFolder, certificatesCsvFileName, 'csv')
+
+			// Find appertain attestation record and join it
+			for (let certificate of certificates[attestationFolder]) {
+				const attestationsFilter = attestations[attestationFolder].filter((a)=>{
+					return a.certificate == certificate.certificate
+				})
+				if(attestationsFilter.length != 1)
+					return new Promise((resolve, reject) => {
+						reject(`An certificate must be found in attestation. ${certificate.certificate} referes to ${attestationsFilter.length} attestations.`)
+					})
+
+				let attestation = JSON.parse(JSON.stringify(attestationsFilter[0]))
+
+				// Add also attestation folder for the output
+				attestation.attestation_folder = attestationFolder
+
+				// Itterate over attestation object and add its propoerties to certificate object
+				certificate = Object.assign(certificate, attestation)
+
+				// Add allocation to allAllocations
+				allCertificates.push(certificate)
+			}
+		}
+		return new Promise((resolve, reject) => {
+			resolve(allCertificates)
+		})
+	}
 }
