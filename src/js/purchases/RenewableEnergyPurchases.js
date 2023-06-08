@@ -844,6 +844,10 @@ export class RenewableEnergyPurchases {
 				// Add also attestation folder for the output
 				attestation.attestation_folder = attestationFolder
 
+				// Rename attestation volume_Wh and allocation/certificate volume_MWh
+				delete Object.assign(attestation, {attestation_volume_Wh: attestation.volume_Wh }).volume_Wh
+				delete Object.assign(certificate, {allocation_volume_MWh: certificate.volume_MWh }).volume_MWh
+				
 				// Itterate over attestation object and add its propoerties to certificate object
 				certificate = Object.assign(certificate, attestation)
 
