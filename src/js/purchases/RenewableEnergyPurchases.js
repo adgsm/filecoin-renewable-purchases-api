@@ -844,6 +844,19 @@ export class RenewableEnergyPurchases {
 				// Add also attestation folder for the output
 				attestation.attestation_folder = attestationFolder
 
+				// Find batchID from redemptions
+				const redemptionsFilter = redemptions[transactionFolder.name].filter((r)=>{
+					return r.attestation_id == attestation.attestation_id
+				})
+				if(redemptionsFilter.length != 1)
+					return new Promise((resolve, reject) => {
+						reject(`A attestation must be found in redemoptions. ${attestation.attestation_id} referes to ${redemptionsFilter.length} redemptions.`)
+					})
+				const batchID = redemptionsFilter[0].batchID
+
+				// Add batch Id to attestation record
+				attestation.batchID = batchID
+				
 				// Rename attestation volume_Wh and allocation/certificate volume_MWh
 				delete Object.assign(attestation, {attestation_volume_Wh: attestation.volume_Wh }).volume_Wh
 				delete Object.assign(certificate, {allocation_volume_MWh: certificate.volume_MWh }).volume_MWh
